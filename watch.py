@@ -7,6 +7,7 @@
 環境変数:
   NTFY_TOPIC   通知先の ntfy トピック名(未設定なら通知せず画面に出すだけ)
   TEST_NOTIFY  "1" ならテスト通知を1本送って終わる
+  SIMULATE     "1" なら実データを取ったうえで、2枠を「新しく空いた」ことにして通知する(状態は保存しない)
 """
 
 import json
@@ -147,6 +148,15 @@ def main():
         state["error_notified"] = False
 
     prev = state.get("slots", {})
+    simulate = os.environ.get("SIMULATE") == "1"
+    if simulate:
+        # 本物の取得結果のうち先頭2枠を「前回は満員・今回1つ空いた」ことにする
+        prev = dict(prev)
+        slots = dict(slots)
+        for k in sorted(slots, key=lambda k: (info[k][1], k))[:2]:
+            prev[k] = 0
+            slots[k] = 1
+
     newly = [k for k, free in slots.items() if free > 0 and prev.get(k, 0) == 0]
     open_now = [k for k, free in slots.items() if free > 0]
 
@@ -157,8 +167,11 @@ def main():
         lines = [f"{label(*info[k])} 残り{slots[k]}" for k in newly[:15]]
         if len(newly) > 15:
             lines.append(f"ほか {len(newly) - 15}枠")
-        notify(f"学科試験に空き {len(newly)}枠", "\n".join(lines))
+        prefix = "【テスト】" if simulate else ""
+        notify(f"{prefix}学科試験に空き {len(newly)}枠", "\n".join(lines))
 
+    if simulate:
+        return 0  # 偽の空きを次回に持ち越さない
     state["slots"] = slots
     save_state(state)
     return 0
