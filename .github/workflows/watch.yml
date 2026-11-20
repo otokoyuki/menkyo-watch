@@ -1,0 +1,42 @@
+name: 学科試験の空き枠チェック
+
+on:
+  schedule:
+    - cron: "*/5 * * * *" # 5分おき(GitHub の都合で数分〜十数分遅れることがある)
+  workflow_dispatch:
+    inputs:
+      test_notify:
+        description: "テスト通知だけ送る"
+        type: boolean
+        default: false
+
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # 前回の結果(state.json)を取り出す
+      - uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+
+      - name: 空き枠を確認
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          TEST_NOTIFY: ${{ inputs.test_notify && '1' || '' }}
+        run: python3 watch.py
+
+      # 今回の結果を次回のために保存する
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
