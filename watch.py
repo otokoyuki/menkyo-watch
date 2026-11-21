@@ -21,7 +21,8 @@ from pathlib import Path
 
 # ---- 見張る条件 ----------------------------------------------------------
 PLACES = {"270": "府中", "280": "鮫洲", "250": "江東"}
-COURSE_CODE = "11"  # 教習所卒業等・免許証のみ
+# 教習所卒業等の区分。予約サイトで「マイナ免許証のみ」「両方」を選ぶと 61 になる
+COURSES = {"11": "免許証のみ", "61": "マイナ・両方"}
 MONTHS_AHEAD = 3  # 今月を含めて何ヶ月分見るか(11月なら 11・12・1月)
 # -------------------------------------------------------------------------
 
@@ -53,9 +54,9 @@ def target_months(now):
     return out
 
 
-def fetch_month(place, month):
+def fetch_month(course, place, month):
     q = urllib.parse.urlencode(
-        {"date": month, "coursecode": COURSE_CODE, "placecode": place, "user": "pub"}
+        {"date": month, "coursecode": course, "placecode": place, "user": "pub"}
     )
     req = urllib.request.Request(f"{API}?{q}", headers=HEADERS)
     with urllib.request.urlopen(req, timeout=30) as res:
@@ -68,28 +69,33 @@ def fetch_month(place, month):
 def collect(now):
     """{枠キー: 空き数} と、枠キー→表示用の情報 を返す。"""
     today = now.strftime("%Y%m%d")
+    now_hhmm = now.strftime("%H%M")
     slots, info = {}, {}
     first = True
-    for month in target_months(now):
-        for place, place_name in PLACES.items():
-            if not first:
-                time.sleep(2)  # サーバーに負担をかけないよう間を空ける
-            first = False
-            for row in fetch_month(place, month):
-                date = row["date"]
-                if date <= today:  # 当日以前は予約できない
-                    continue
-                free = max(0, int(row["capacity"]) - int(row["reservation"]))
-                key = f"{place}-{date}-{row['starttime']}"
-                slots[key] = free
-                ampm = "午前" if int(row["starttime"]) < 1000 else "午後"
-                info[key] = (place_name, date, ampm)
+    for course, course_name in COURSES.items():
+        for month in target_months(now):
+            for place, place_name in PLACES.items():
+                if not first:
+                    time.sleep(2)  # サーバーに負担をかけないよう間を空ける
+                first = False
+                for row in fetch_month(course, place, month):
+                    date, start = row["date"], row["starttime"]
+                    if date < today:
+                        continue
+                    if date == today and start <= now_hhmm:  # 当日でも受付時刻を過ぎた枠は除く
+                        continue
+                    free = max(0, int(row["capacity"]) - int(row["reservation"]))
+                    key = f"{course}-{place}-{date}-{start}"
+                    slots[key] = free
+                    ampm = "午前" if int(start) < 1000 else "午後"
+                    info[key] = (place_name, date, ampm, course_name, date == today)
     return slots, info
 
 
-def label(place_name, date, ampm):
+def label(place_name, date, ampm, course_name, is_today):
     d = datetime.strptime(date, "%Y%m%d")
-    return f"{d.month}/{d.day}({WEEKDAYS[d.weekday()]}) {ampm} {place_name}"
+    mark = "【当日】" if is_today else ""
+    return f"{mark}{d.month}/{d.day}({WEEKDAYS[d.weekday()]}) {ampm} {place_name}［{course_name}］"
 
 
 def notify(title, message, priority=4, tags=("rotating_light",)):
