@@ -75,16 +75,20 @@ def targets(now):
 
 
 def fetch_month(course, place, month):
-    """(その月の枠の一覧, データの作成時刻[epoch秒]) を返す。"""
+    """(その月の枠の一覧, データの作成時刻[epoch秒], 予約サイトのカレンダーで使えるか) を返す。
+
+    キャッシュは作った人の Origin に応じた Access-Control-Allow-Origin ごと5分使い回される。
+    名乗り無しのツールが作ると予約サイト以外の値になり、その5分間はカレンダーが全部灰色になる。"""
     q = urllib.parse.urlencode(
         {"date": month, "coursecode": course, "placecode": place, "user": "pub"}
     )
     req = urllib.request.Request(f"{API}?{q}", headers=HEADERS)
     with urllib.request.urlopen(req, timeout=30) as res:
         data = json.loads(res.read().decode("utf-8"))
+        calendar_ok = res.headers.get("Access-Control-Allow-Origin") == HEADERS["Origin"]
     if data.get("code") != "A0001":
         raise RuntimeError(f"想定外の応答 code={data.get('code')}")
-    return data.get("body") or [], float(data.get("currenttime") or time.time())
+    return data.get("body") or [], float(data.get("currenttime") or time.time()), calendar_ok
 
 
 def parse(course, place, rows, now, info):
@@ -136,11 +140,14 @@ def notify(title, message, priority=4, tags=("rotating_light",)):
         log(f"通知の送信に失敗: {e}")
 
 
-def notify_found(found, slots, info, prefix=""):
+def notify_found(found, slots, info, prefix="", calendar_ok=True, made_at=None):
     found = sorted(found, key=lambda k: (info[k][1], k))
     lines = [f"{label(*info[k])} 残り{slots[k]}" for k in found[:15]]
     if len(found) > 15:
         lines.append(f"ほか {len(found) - 15}枠")
+    if not calendar_ok and made_at:
+        until = datetime.fromtimestamp(made_at + CACHE_TTL, JST).strftime("%H:%M:%S")
+        lines.append(f"⚠ カレンダー故障中(灰色)〜{until}。「えらぶ」で日付を指定するか、{until}に出し直し")
     # 最高優先度: 端末側でサイレントモードを無視する設定にすれば深夜でも鳴る
     notify(f"{prefix}学科試験に空き {len(found)}枠", "\n".join(lines), priority=5)
 
@@ -179,7 +186,7 @@ def run_once(state, simulate):
         if not first:
             time.sleep(2)
         first = False
-        rows, _ = fetch_month(course, place, month)
+        rows, made_at, calendar_ok = fetch_month(course, place, month)
         batch = parse(course, place, rows, now, info)
         if simulate and not newly and batch:
             # 最初に取れた2枠を「前回は満員・今回1つ空いた」ことにする
@@ -190,7 +197,7 @@ def run_once(state, simulate):
         known.update(batch)
         if found:
             newly.extend(found)
-            notify_found(found, batch, info, "【テスト】" if simulate else "")
+            notify_found(found, batch, info, "【テスト】" if simulate else "", calendar_ok, made_at)
     open_now = sum(1 for v in known.values() if v > 0)
     log(f"{now:%Y-%m-%d %H:%M} 1周確認 / 空きあり {open_now}枠 / 新しく空いた {len(newly)}枠")
     if not simulate:
@@ -228,7 +235,7 @@ def run_loop(state, minutes):
         course, place, month = t
         last_req = time.time()
         try:
-            rows, made_at = fetch_month(course, place, month)
+            rows, made_at, calendar_ok = fetch_month(course, place, month)
         except Exception as e:  # 通信エラーや仕様変更
             errors += 1
             log(f"取得失敗({errors}回連続) {course}-{place}-{month}: {e}")
@@ -257,9 +264,10 @@ def run_loop(state, minutes):
         found = [k for k, free in batch.items() if free > 0 and known.get(k, 0) == 0]
         known.update(batch)
         if found:
-            notify_found(found, batch, info)
+            notify_found(found, batch, info, "", calendar_ok, made_at)
         open_now = sum(1 for v in batch.values() if v > 0)
         log(f"{now:%H:%M:%S} {COURSES[course]}・{PLACES[place]}・{month[4:]}月 データ{age:3.0f}秒前 空き{open_now}枠"
+            + ("" if calendar_ok else " [カレンダー故障中]")
             + (f" ← 新しく空いた {len(found)}枠" if found else ""))
         save_state(state, now)
 
