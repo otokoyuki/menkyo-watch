@@ -22,7 +22,8 @@ from pathlib import Path
 # ---- 見張る条件 ----------------------------------------------------------
 PLACES = {"270": "府中", "280": "鮫洲", "250": "江東"}
 # 教習所卒業等の区分。予約サイトで「マイナ免許証のみ」「両方」を選ぶと 61 になる
-COURSES = {"11": "免許証のみ", "61": "マイナ・両方"}
+# 空きが出やすい 61 を先に見る(見つけた順に通知するので、先に見る方が早く届く)
+COURSES = {"61": "マイナ・両方", "11": "免許証のみ"}
 MONTHS_AHEAD = 3  # 今月を含めて何ヶ月分見るか(11月なら 11・12・1月)
 # -------------------------------------------------------------------------
 
@@ -66,11 +67,12 @@ def fetch_month(course, place, month):
     return data.get("body") or []
 
 
-def collect(now):
-    """{枠キー: 空き数} と、枠キー→表示用の情報 を返す。"""
+def collect(now, slots, info, on_batch):
+    """全枠の {枠キー: 空き数} を slots に、表示用の情報を info に入れていく。
+    1回問い合わせるごとに on_batch(その回の枠キー一覧) を呼ぶ(見つけ次第すぐ通知するため)。
+    途中で失敗しても、それまでの結果は slots に残る。"""
     today = now.strftime("%Y%m%d")
     now_hhmm = now.strftime("%H%M")
-    slots, info = {}, {}
     first = True
     for course, course_name in COURSES.items():
         for month in target_months(now):
@@ -78,6 +80,7 @@ def collect(now):
                 if not first:
                     time.sleep(2)  # サーバーに負担をかけないよう間を空ける
                 first = False
+                batch = []
                 for row in fetch_month(course, place, month):
                     date, start = row["date"], row["starttime"]
                     if date < today:
@@ -89,7 +92,8 @@ def collect(now):
                     slots[key] = free
                     ampm = "午前" if int(start) < 1000 else "午後"
                     info[key] = (place_name, date, ampm, course_name, date == today)
-    return slots, info
+                    batch.append(key)
+                on_batch(batch)
 
 
 def label(place_name, date, ampm, course_name, is_today):
@@ -138,14 +142,39 @@ def main():
 
     now = datetime.now(JST)
     state = load_state()
+    prev = dict(state.get("slots", {}))
+    simulate = os.environ.get("SIMULATE") == "1"
+    slots, info, newly = {}, {}, []
+
+    def on_batch(keys):
+        if simulate and not newly and keys:
+            # 最初に取れた2枠を「前回は満員・今回1つ空いた」ことにする
+            for k in sorted(keys, key=lambda k: (info[k][1], k))[:2]:
+                prev[k] = 0
+                slots[k] = 1
+        found = [k for k in keys if slots[k] > 0 and prev.get(k, 0) == 0]
+        if not found:
+            return
+        newly.extend(found)
+        found.sort(key=lambda k: (info[k][1], k))
+        lines = [f"{label(*info[k])} 残り{slots[k]}" for k in found[:15]]
+        if len(found) > 15:
+            lines.append(f"ほか {len(found) - 15}枠")
+        prefix = "【テスト】" if simulate else ""
+        # 見つけた時点ですぐ送る。最高優先度: 端末側でサイレントモードを無視する設定にすれば深夜でも鳴る
+        notify(f"{prefix}学科試験に空き {len(found)}枠", "\n".join(lines), priority=5)
 
     try:
-        slots, info = collect(now)
+        collect(now, slots, info, on_batch)
     except Exception as e:  # 通信エラーや仕様変更
         print(f"取得失敗: {e}", file=sys.stderr)
+        if not simulate:
+            # 途中まで取れた分は保存して、次回同じ空きで二重に鳴らないようにする
+            state["slots"] = {**state.get("slots", {}), **slots}
         if not state.get("error_notified"):
             notify("見張りが失敗しています", f"空き枠の取得に失敗しました。\n{e}", 3, ("warning",))
             state["error_notified"] = True
+        if not simulate:
             save_state(state)
         return 1
 
@@ -153,29 +182,8 @@ def main():
         notify("見張りが復旧しました", "空き枠の取得が再びできるようになりました。", 2, ("white_check_mark",))
         state["error_notified"] = False
 
-    prev = state.get("slots", {})
-    simulate = os.environ.get("SIMULATE") == "1"
-    if simulate:
-        # 本物の取得結果のうち先頭2枠を「前回は満員・今回1つ空いた」ことにする
-        prev = dict(prev)
-        slots = dict(slots)
-        for k in sorted(slots, key=lambda k: (info[k][1], k))[:2]:
-            prev[k] = 0
-            slots[k] = 1
-
-    newly = [k for k, free in slots.items() if free > 0 and prev.get(k, 0) == 0]
     open_now = [k for k, free in slots.items() if free > 0]
-
     print(f"{now:%Y-%m-%d %H:%M} 確認 {len(slots)}枠 / 空きあり {len(open_now)}枠 / 新しく空いた {len(newly)}枠")
-
-    if newly:
-        newly.sort(key=lambda k: (info[k][1], k))
-        lines = [f"{label(*info[k])} 残り{slots[k]}" for k in newly[:15]]
-        if len(newly) > 15:
-            lines.append(f"ほか {len(newly) - 15}枠")
-        prefix = "【テスト】" if simulate else ""
-        # 最高優先度: 端末側でサイレントモードを無視する設定にすれば深夜でも鳴る
-        notify(f"{prefix}学科試験に空き {len(newly)}枠", "\n".join(lines), priority=5)
 
     if simulate:
         return 0  # 偽の空きを次回に持ち越さない
