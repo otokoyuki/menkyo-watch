@@ -174,7 +174,8 @@ def main():
         if len(newly) > 15:
             lines.append(f"ほか {len(newly) - 15}枠")
         prefix = "【テスト】" if simulate else ""
-        notify(f"{prefix}学科試験に空き {len(newly)}枠", "\n".join(lines))
+        # 最高優先度: 端末側でサイレントモードを無視する設定にすれば深夜でも鳴る
+        notify(f"{prefix}学科試験に空き {len(newly)}枠", "\n".join(lines), priority=5)
 
     if simulate:
         return 0  # 偽の空きを次回に持ち越さない
